@@ -1,5 +1,3 @@
-# 🚧 WORK IN PROGRESS. See [#1](https://github.com/kfcampbell/octoherd-script-workflows/pull/1) | [Preview](https://github.com/kfcampbell/octoherd-script-workflows/tree/initial-version)
-
 # octoherd-script-workflows
 
 > Creates PRs to add CodeQL and Dependabot workflows across repositories
