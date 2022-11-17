@@ -3,6 +3,36 @@
 import * as fs from 'fs';
 import path from 'path';
 
+async function openPR(octokit, repository, branchRef, title, body) {
+	await octokit.request('POST /repos/{owner}/{repo}/pulls', {
+		owner: repository.owner.login,
+		repo: repository.name,
+		title: title,
+		body: body,
+		head: branchRef,
+		base: repository.default_branch,
+	});
+}
+
+async function createBranch(octokit, repository, branchName) {
+	// get SHA of latest default branch commit
+	const { data: { object: { sha } } } = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+		owner: repository.owner.login,
+		repo: repository.name,
+		ref: `heads/${repository.default_branch}`,
+	});
+
+	// create a branch off of the latest repo SHA
+	const branch = await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
+		owner: repository.owner.login,
+		repo: repository.name,
+		ref: `refs/heads/${branchName}`,
+		sha: sha,
+	});
+
+	return branch
+}
+
 /**
  * Creates PRs to add CodeQL and Dependabot workflows across repositories
  *
@@ -10,6 +40,59 @@ import path from 'path';
  * @param {import('@octoherd/cli').Repository} repository
  */
 export async function script(octokit, repository, { templateDirectory }) {
+
+	// get list of all files in templates directory
+	const files = fs.readdirSync(templateDirectory);
+
+	// iterate through files and store the string content of each file
+	const templates = await Promise.all(
+		files.map(async (file) => {
+			// read the string content of each file in the templates directory into variable
+			const template = await fs.promises.readFile(
+				path.join(templateDirectory, file),
+				'utf8'
+			);
+			return {
+				name: file,
+				content: template,
+			};
+		})
+	);
+
+	// get primary language used in repository
+	const { data: languages } = await octokit.request(
+		'GET /repos/{owner}/{repo}/languages',
+		{
+			owner: repository.owner.login,
+			repo: repository.name,
+		}
+	);
+
+	// figure out dominant language used in repository
+	let dominantLanguage = '';
+	let dominantLanguageBytes = 0;
+	for (const language in languages) {
+		if (languages[language] > dominantLanguageBytes) {
+			dominantLanguage = language;
+			dominantLanguageBytes = languages[language];
+		}
+	}
+
+	if (dominantLanguage === '') {
+		throw new Error('Could not determine repository dominant language');
+	}
+
+	// come up with branch name based on the current date. remove all spaces, colons, parentheses, and periods
+	let branchName = `octoherd/${new Date().toString().replace(/ /g, '-').replace(/:/g, '-').replace(/\(/g, '-').replace(/\)/g, '-').replace(/\./g, '-')}`;
+
+	// only take the first part of branchName before "-GMT"
+	branchName = branchName.split('-GMT')[0];
+
+	// lowercase the branchName
+	branchName = branchName.toLowerCase();
+
+	let branchCreated = false;
+	let PRCreated = false;
 
 	let alertsEnabled = false;
 	try {
@@ -41,8 +124,6 @@ export async function script(octokit, repository, { templateDirectory }) {
 		owner: repository.owner.login,
 		repo: repository.name,
 	});
-
-
 
 	// check to see if .github/dependabot.yml exists
 	let dependabotYmlExists = false;
@@ -90,44 +171,6 @@ export async function script(octokit, repository, { templateDirectory }) {
 
 		// if neither .github/dependabot.yml or .github/dependabot.yaml exist, create a PR to add .github/dependabot.yml
 		if (!dependabotYmlExists && !dependabotYamlExists) {
-
-			// get list of all files in templates directory
-			const files = fs.readdirSync(templateDirectory);
-
-			// iterate through files and store the string content of each file
-			const templates = await Promise.all(
-				files.map(async (file) => {
-					// read the string content of each file in the templates directory into variable
-					const template = await fs.promises.readFile(
-						path.join(templateDirectory, file),
-						'utf8'
-					);
-					return {
-						name: file,
-						content: template,
-					};
-				})
-			);
-
-			// get primary language used in repository
-			const { data: languages } = await octokit.request(
-				'GET /repos/{owner}/{repo}/languages',
-				{
-					owner: repository.owner.login,
-					repo: repository.name,
-				}
-			);
-
-			// figure out dominant language used in repository
-			let dominantLanguage = '';
-			let dominantLanguageBytes = 0;
-			for (const language in languages) {
-				if (languages[language] > dominantLanguageBytes) {
-					dominantLanguage = language;
-					dominantLanguageBytes = languages[language];
-				}
-			}
-
 			// get the correct template based on dominant language
 			let template = '';
 			if (dominantLanguage.toLowerCase() === 'javascript' || dominantLanguage.toLowerCase() === 'typescript') {
@@ -140,43 +183,8 @@ export async function script(octokit, repository, { templateDirectory }) {
 				template = 'ruby.yml';
 			}
 
-			// Buffer.from(template.content).toString("base64")
-
-			octokit.log.warn(`dominantLanguage: ${dominantLanguage}`);
-
-			// come up with branch name based on the current date. remove all spaces, colons, parentheses, and periods
-			let branchName = `octoherd/${new Date().toString().replace(/ /g, '-').replace(/:/g, '-').replace(/\(/g, '-').replace(/\)/g, '-').replace(/\./g, '-')}`;
-
-			// only take the first part of branchName before "-GMT"
-			branchName = branchName.split('-GMT')[0];
-
-			// lowercase the branchName
-			branchName = branchName.toLowerCase();
-
-			// get SHA of latest default branch commit
-			const { data: { object: { sha } } } = await octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
-				owner: repository.owner.login,
-				repo: repository.name,
-				ref: `heads/${repository.default_branch}`,
-			});
-
-			// set timeout to 10 seconds
-			octokit.hook.wrap("request", async (request, options) => {
-				options.request = {
-					// set options.request.signal to give a 10 second timeout
-					signal: new AbortController().signal,
-					timeout: 10000,
-				};
-				return request(options);
-			});
-
-			// create a branch off of the latest repo SHA
-			const branch = await octokit.request("POST /repos/{owner}/{repo}/git/refs", {
-				owner: repository.owner.login,
-				repo: repository.name,
-				ref: `refs/heads/${branchName}`,
-				sha: sha,
-			});
+			const branch = await createBranch(octokit, repository, branchName);
+			branchCreated = true;
 
 			// get template content from file
 			if (templates === undefined) {
@@ -196,19 +204,89 @@ export async function script(octokit, repository, { templateDirectory }) {
 				branch: branch.data.ref,
 			});
 
-			// create PR to add .github/dependabot.yml
-			await octokit.request('POST /repos/{owner}/{repo}/pulls', {
-				owner: repository.owner.login,
-				repo: repository.name,
-				title: 'Add Dependabot',
-				body: 'This PR adds Dependabot to your repository',
-				head: branch.data.ref,
-				base: repository.default_branch,
-			});
+			await openPR(octokit, repository, branch.data.ref,
+				`feat: add missing ${dominantLanguage} workflows`,
+				`This PR adds missing ${dominantLanguage} workflows to the repository. These may include Dependabot and CodeQL workflows.`);
+			PRCreated = true;
 		}
 	}
 
+	// check to see if .github/workflows/codeql.yml exists
+	let codeqlYmlExists = false;
+	try {
+		const codeqlYml = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+			owner: repository.owner.login,
+			repo: repository.name,
+			path: '.github/workflows/codeql.yml',
+		});
+		codeqlYmlExists = true;
+	} catch (err) {
+		// if the error is a 404, then the file does not exist
+		if (err.status !== 404) {
+			throw err;
+		}
+		codeqlYmlExists = false;
+	}
 
+	let codeqlYamlExists = false;
+	if (!codeqlYmlExists) {
+		try {
+			const codeqlYaml = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+				owner: repository.owner.login,
+				repo: repository.name,
+				path: '.github/workflows/codeql.yaml',
+			});
+			codeqlYamlExists = true;
+		} catch (err) {
+			// if the error is a 404, then the file does not exist
+			if (err.status !== 404) {
+				throw err;
+			}
+			codeqlYamlExists = false;
+		}
+	}
 
+	if (!codeqlYmlExists && !codeqlYamlExists) {
+		// get the codeql template from file
+		let codeqlTemplate = templates.find((t) => t.name === 'codeql.yml').content;
+		let codeqlLanguage = dominantLanguage.toLowerCase();
 
+		if (codeqlLanguage === 'typescript') {
+			codeqlLanguage = 'javascript';
+		}
+
+		// CodeQL supports [ 'cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby' ]
+		// make sure our dominantlanguage is supported by CodeQL
+		if (!(['cpp', 'csharp', 'go', 'java', 'javascript', 'python', 'ruby'].includes(codeqlLanguage))) {
+			octokit.log.warn(`CodeQL does not support ${dominantLanguage} in repository ${repository.name}`);
+			octokit.log.warn(`Skipping CodeQL setup in repository ${repository.name}`);
+		}
+
+		// replace the language in the codeql template
+		codeqlTemplate = codeqlTemplate.replace('**language**', `${codeqlLanguage}`);
+
+		// if the branch hasn't been created, do so now
+		if (!branchCreated) {
+			const branch = await createBranch(octokit, repository, branchName);
+			branchCreated = true;
+		}
+
+		// create commit for codeql template
+		await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
+			owner: repository.owner.login,
+			repo: repository.name,
+			path: `.github/workflows/codeql.yml`,
+			message: `feat: add codeql workflow`,
+			content: Buffer.from(codeqlTemplate).toString("base64"),
+			branch: repository.default_branch,
+		});
+
+		// if the PR hasn't been created, do so now
+		if (!PRCreated) {
+			await openPR(octokit, repository, branchName,
+				`feat: add missing ${dominantLanguage} workflows`,
+				`This PR adds missing ${dominantLanguage} workflows to the repository. These may include Dependabot and CodeQL workflows.`);
+			PRCreated = true;
+		}
+	}
 }

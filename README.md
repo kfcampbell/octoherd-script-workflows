@@ -15,6 +15,10 @@ npx octoherd-script-workflows
 
 Pass all options as CLI flags to avoid user prompts
 
+```
+node cli.js -T $GITHUB_TOKEN -R owner/repo --template-directory $(pwd)/templates
+```
+
 ```js
 npx octoherd-script-workflows \
   -T ghp_0123456789abcdefghjklmnopqrstuvwxyzA \
