@@ -3,6 +3,130 @@
 import * as fs from 'fs';
 import path from 'path';
 
+async function shouldCreateCodeqlPR(octokit, repository) {
+	// check to see if .github/workflows/codeql.yml exists
+	let codeqlYmlExists = false;
+	try {
+		const codeqlYml = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+			owner: repository.owner.login,
+			repo: repository.name,
+			path: '.github/workflows/codeql.yml',
+		});
+		codeqlYmlExists = true;
+	} catch (err) {
+		// if the error is a 404, then the file does not exist
+		if (err.status !== 404) {
+			throw err;
+		}
+		codeqlYmlExists = false;
+	}
+
+	let codeqlYamlExists = false;
+	if (!codeqlYmlExists) {
+		try {
+			const codeqlYaml = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+				owner: repository.owner.login,
+				repo: repository.name,
+				path: '.github/workflows/codeql.yaml',
+			});
+			codeqlYamlExists = true;
+		} catch (err) {
+			// if the error is a 404, then the file does not exist
+			if (err.status !== 404) {
+				throw err;
+			}
+			codeqlYamlExists = false;
+		}
+	}
+
+	if (codeqlYmlExists || codeqlYamlExists) {
+		return false
+	}
+	return true
+}
+
+async function shouldCreateDependabotPR(octokit, repository) {
+
+	// check to see if .github/dependabot.yml exists
+	let dependabotYmlExists = false;
+	try {
+		const { data: dependabotYml } = await octokit.request(
+			'GET /repos/{owner}/{repo}/contents/{path}',
+			{
+				owner: repository.owner.login,
+				repo: repository.name,
+				path: '.github/dependabot.yml',
+			}
+		);
+		if (dependabotYml) {
+			dependabotYmlExists = true;
+		}
+	} catch (err) {
+		// ignore if it's a 404 error
+		if (err.status !== 404) {
+			throw err;
+		}
+	}
+
+	let dependabotYamlExists = false;
+	// if .github/dependabot.yml doesn't exist, try .github/dependabot.yaml
+	if (!dependabotYmlExists) {
+		try {
+			const { data: dependabotYaml } = await octokit.request(
+				'GET /repos/{owner}/{repo}/contents/{path}',
+				{
+					owner: repository.owner.login,
+					repo: repository.name,
+					path: '.github/dependabot.yaml',
+				}
+			);
+			if (dependabotYaml) {
+				dependabotYamlExists = true;
+			}
+		} catch (err) {
+			// ignore if it's a 404 error
+			if (err.status !== 404) {
+				throw err;
+			}
+		}
+
+
+		// if neither .github/dependabot.yml or .github/dependabot.yaml exist, create a PR to add .github/dependabot.yml
+		// first check to see if .github/renovate.json exists. if it does, we don't want to add .github/dependabot.yml
+
+		if (!dependabotYmlExists && !dependabotYamlExists) {
+
+			// check to see if renovate.json exists in the repo
+			let renovateJsonExists = false;
+			try {
+				const { data: renovateJson } = await octokit.request(
+					'GET /repos/{owner}/{repo}/contents/{path}',
+					{
+						owner: repository.owner.login,
+						repo: repository.name,
+						path: '.github/renovate.json',
+					}
+				);
+				if (renovateJson) {
+					renovateJsonExists = true;
+				}
+			} catch (err) {
+				// ignore if it's a 404 error
+				if (err.status !== 404) {
+					throw err;
+				}
+			}
+
+			// if no renovate.json, dependabot.yml, or dependabot.yaml exists,
+			// we need to create a new dependabot PR
+			if (!renovateJsonExists) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 async function openPR(octokit, repository, branchRef, title, body) {
 	await octokit.request('POST /repos/{owner}/{repo}/pulls', {
 		owner: repository.owner.login,
@@ -29,7 +153,6 @@ async function createBranch(octokit, repository, branchName) {
 		ref: `refs/heads/${branchName}`,
 		sha: sha,
 	});
-
 	return branch
 }
 
@@ -125,128 +248,48 @@ export async function script(octokit, repository, { templateDirectory }) {
 		repo: repository.name,
 	});
 
-	// check to see if .github/dependabot.yml exists
-	let dependabotYmlExists = false;
-	try {
-		const { data: dependabotYml } = await octokit.request(
-			'GET /repos/{owner}/{repo}/contents/{path}',
-			{
-				owner: repository.owner.login,
-				repo: repository.name,
-				path: '.github/dependabot.yml',
-			}
-		);
-		if (dependabotYml) {
-			dependabotYmlExists = true;
-		}
-	} catch (err) {
-		// ignore if it's a 404 error
-		if (err.status !== 404) {
-			throw err;
-		}
-	}
-
-	let dependabotYamlExists = false;
-	// if .github/dependabot.yml doesn't exist, try .github/dependabot.yaml
-	if (!dependabotYmlExists) {
-		try {
-			const { data: dependabotYaml } = await octokit.request(
-				'GET /repos/{owner}/{repo}/contents/{path}',
-				{
-					owner: repository.owner.login,
-					repo: repository.name,
-					path: '.github/dependabot.yaml',
-				}
-			);
-			if (dependabotYaml) {
-				dependabotYamlExists = true;
-			}
-		} catch (err) {
-			// ignore if it's a 404 error
-			if (err.status !== 404) {
-				throw err;
-			}
+	if (await shouldCreateDependabotPR(octokit, repository)) {
+		// get the correct template based on dominant language
+		let template = '';
+		if (dominantLanguage.toLowerCase() === 'javascript' || dominantLanguage.toLowerCase() === 'typescript') {
+			template = 'node.yml';
+		} else if (dominantLanguage === 'C#' || dominantLanguage.toLowerCase().includes('csharp') || dominantLanguage.toLowerCase().includes('dotnet') || dominantLanguage.toLowerCase().includes('.net')) {
+			template = 'dotnet.yml';
+		} else if (dominantLanguage.toLowerCase() === 'go') {
+			template = 'go.yml';
+		} else if (dominantLanguage.toLowerCase() === 'ruby') {
+			template = 'ruby.yml';
 		}
 
+		const branch = await createBranch(octokit, repository, branchName);
+		branchCreated = true;
 
-		// if neither .github/dependabot.yml or .github/dependabot.yaml exist, create a PR to add .github/dependabot.yml
-		if (!dependabotYmlExists && !dependabotYamlExists) {
-			// get the correct template based on dominant language
-			let template = '';
-			if (dominantLanguage.toLowerCase() === 'javascript' || dominantLanguage.toLowerCase() === 'typescript') {
-				template = 'node.yml';
-			} else if (dominantLanguage === 'C#' || dominantLanguage.toLowerCase().includes('csharp') || dominantLanguage.toLowerCase().includes('dotnet') || dominantLanguage.toLowerCase().includes('.net')) {
-				template = 'dotnet.yml';
-			} else if (dominantLanguage.toLowerCase() === 'go') {
-				template = 'go.yml';
-			} else if (dominantLanguage.toLowerCase() === 'ruby') {
-				template = 'ruby.yml';
-			}
-
-			const branch = await createBranch(octokit, repository, branchName);
-			branchCreated = true;
-
-			// get template content from file
-			if (templates === undefined) {
-				octokit.log.error(`could not find templates`);
-				return;
-			}
-
-			const templateContent = templates.find((t) => t.name === template).content;
-
-			// create commit for dependabot config
-			await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
-				owner: repository.owner.login,
-				repo: repository.name,
-				path: `.github/dependabot.yml`,
-				message: `feat: add ${dominantLanguage} dependabot config`,
-				content: Buffer.from(templateContent).toString("base64"),
-				branch: branch.data.ref,
-			});
-
-			await openPR(octokit, repository, branch.data.ref,
-				`feat: add missing ${dominantLanguage} workflows`,
-				`This PR adds missing ${dominantLanguage} workflows to the repository. These may include Dependabot and CodeQL workflows.`);
-			PRCreated = true;
+		// get template content from file
+		if (templates === undefined) {
+			octokit.log.error(`could not find templates`);
+			return;
 		}
-	}
 
-	// check to see if .github/workflows/codeql.yml exists
-	let codeqlYmlExists = false;
-	try {
-		const codeqlYml = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
+		const templateContent = templates.find((t) => t.name === template).content;
+
+		// create commit for dependabot config
+		await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
 			owner: repository.owner.login,
 			repo: repository.name,
-			path: '.github/workflows/codeql.yml',
+			path: `.github/dependabot.yml`,
+			message: `feat: add ${dominantLanguage} dependabot config`,
+			content: Buffer.from(templateContent).toString("base64"),
+			branch: branch.data.ref,
 		});
-		codeqlYmlExists = true;
-	} catch (err) {
-		// if the error is a 404, then the file does not exist
-		if (err.status !== 404) {
-			throw err;
-		}
-		codeqlYmlExists = false;
+
+		await openPR(octokit, repository, branch.data.ref,
+			`feat: add missing ${dominantLanguage} workflows`,
+			`This PR adds missing ${dominantLanguage} workflows to the repository. These may include Dependabot and CodeQL workflows.`);
+		PRCreated = true;
 	}
 
-	let codeqlYamlExists = false;
-	if (!codeqlYmlExists) {
-		try {
-			const codeqlYaml = await octokit.request('GET /repos/{owner}/{repo}/contents/{path}', {
-				owner: repository.owner.login,
-				repo: repository.name,
-				path: '.github/workflows/codeql.yaml',
-			});
-			codeqlYamlExists = true;
-		} catch (err) {
-			// if the error is a 404, then the file does not exist
-			if (err.status !== 404) {
-				throw err;
-			}
-			codeqlYamlExists = false;
-		}
-	}
+	if (await shouldCreateCodeqlPR(octokit, repository)) {
 
-	if (!codeqlYmlExists && !codeqlYamlExists) {
 		// get the codeql template from file
 		let codeqlTemplate = templates.find((t) => t.name === 'codeql.yml').content;
 		let codeqlLanguage = dominantLanguage.toLowerCase();
